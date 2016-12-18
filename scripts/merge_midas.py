@@ -178,6 +178,8 @@ merge_midas.py snps /path/to/outdir -i /path/to/samples -t dir --max_species 1 -
 		help="Directory for output files. a subdirectory will be created for each species_id")
 	parser.add_argument('--threads', type=int, default=1, metavar='INT',
 		help="Number of CPUs to use for merging files (1)\nIncreases speed when merging many species")
+	parser.add_argument('--sites_per_iter', type=int, default=20000, metavar='INT',
+		help=argparse.SUPPRESS)
 	io = parser.add_argument_group('Input/Output')
 	io.add_argument('-i', type=str, dest='input', required=True,
 		help="""Input to sample directories output by run_midas.py
@@ -191,6 +193,8 @@ file: -i is a file containing paths to sample directories (ex: /path/to/sample_p
 	io.add_argument('-d', type=str, dest='db', default=os.environ['MIDAS_DB'] if 'MIDAS_DB' in os.environ else None,
 		help="""Path to reference database
 By default, the MIDAS_DB environmental variable is used""")
+	presets = parser.add_argument_group("Presets (option groups for easily...)")
+	
 	species = parser.add_argument_group("Species filters (select subset of species from INPUT)")
 	species.add_argument('--min_samples', type=int, default=1, metavar='INT',
 		help="""All species with >= MIN_SAMPLES (1)""")
@@ -207,20 +211,27 @@ By default, the MIDAS_DB environmental variable is used""")
 		help="""Maximum number of samples to process. useful for quick tests (use all)""")
 	snps = parser.add_argument_group("Site filters (select subset of genomic sites from INPUT)")
 	snps.add_argument('--site_depth', type=int, default=3, metavar='INT',
-		help="""Minimum number of mapped reads per site.
+		help="""Minimum number of mapped reads per site (3)
 A high value like 20 will result in accurate allele frequencies, but may discard many sites.
-A low value like 1 will retain many sites but may not result in accurate allele frequencies (3)""")
+A low value like 1 will retain many sites but may not result in accurate allele frequencies""")
+	snps.add_argument('--site_ratio', type=float, default=3.0, metavar='FLOAT',
+		help="""Maximum ratio of site depth to genome depth (3.0)
+This filter helps to eliminate genomic sites with abnormally high read depth""")
 	snps.add_argument('--site_prev', type=float, default=0.95, metavar='FLOAT',
-		help="""Site has at least <site_depth> coverage in at least <site_prev> proportion of samples.
-A value of 1.0 will select sites that have sufficent coverage in all samples.
-A value of 0.0 will select all sites, including those with low coverage in many samples
-NAs recorded for included sites with less than <site_depth> in a sample (0.95)""")
+		help="""Genomic site is present in at least <site_prev> proportion of samples (0.95)
+Site presence/absence is determined by --site_depth and --site_ratio.
+A value of 1.0 will select sites that are present in all samples.
+A value of 0.0 will select all sites, including those with low coverage""")
 	snps.add_argument('--site_maf', type=float, default=0.0, metavar='FLOAT',
-		help="""Minimum minor allele frequency of site across samples.
-Setting this to zero (default) will keep invariant sites across samples.
-Setting this above zero (e.g. 0.01, 0.02, 0.05) will only keep common variants""")
+		help="""Minimum pooled minor allele frequency of site (0.0)
+This filter helps to eliminate invariant genomic sites.
+Values above zero (e.g. 0.01, 0.02, 0.05) will only keep common variants""")
+	snps.add_argument('--site_multi_freq', type=float, default=0.01, metavar='FLOAT',
+		help="""Maximum pooled frequency of 3rd and 4th alleles (0.01)
+This filter helps to eliminate sites with more than 2 common variants""")
 	snps.add_argument('--max_sites', type=int, default=float('Inf'), metavar='INT',
-		help="""Maximum number of sites to include in output. useful for quick tests (use all)""")
+		help="""Maximum number of sites to include in output (use all)
+Useful for quick tests """)
 	args = vars(parser.parse_args())
 	return args
 

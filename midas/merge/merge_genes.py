@@ -113,7 +113,7 @@ def run_pipeline(args):
 		write_gene_matrices(sp)
 
 		print("  writing summary statistics")
-		merge.write_summary_stats(sp.id, sp.samples, args, 'genes')
+		sp.write_sample_info(type='genes', outdir=args['outdir'])
 
 		write_readme(args, sp)
 		

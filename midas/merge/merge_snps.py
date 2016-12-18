@@ -4,173 +4,30 @@
 # Copyright (C) 2015 Stephen Nayfach
 # Freely distributed under the GNU General Public License (GPLv3)
 
-import sys, os, shutil, numpy as np
+import sys, os, numpy as np, gzip, csv, random, Bio.SeqIO
+from time import time
+from operator import itemgetter
 from midas import utility
-from midas.merge import merge, annotate, snp_matrix
-
-def store_data(snpfiles):
-	""" List of records from specified sample_ids """
-	x = []
-	for file in snpfiles:
-		try: x.append(next(file))
-		except StopIteration: return None
-	return x
-
-def open_infiles(species_id, samples):
-	""" Open SNP files for species across samples """
-	infiles = []
-	for sample in samples:
-		inpath = '%s/snps/output/%s.snps.gz' % (sample.dir, species_id)
-		infiles.append(utility.parse_file(inpath))
-	return infiles
-
-def open_matrices(outdir, sample_ids, index=None):
-	""" Open matrices and write headers """
-	matrices = {}
-	for type in ['ref_freq', 'depth', 'alt_allele']:
-		if index is None: outpath = '%s/snps_%s.txt' % (outdir, type)
-		else: outpath = '%s/snps_%s.%s.txt' % (outdir, type, index)
-		matrices[type] = open(outpath, 'w')
-		matrices[type].write('\t'.join(['site_id']+sample_ids)+'\n')
-	return matrices
-
-def build_snp_matrix(species_id, samples, args):
-	""" Split up samples into batches, merge each batch, merge together batches """
-	# build temp matrixes in parallel
-	list = []
-	tempdir = '%s/%s/temp' % (args['outdir'], species_id)
-	if not os.path.isdir(tempdir): os.mkdir(tempdir)
-	batches = utility.batch_samples(samples, threads=1)
-	for index, batch in enumerate(batches):
-		temp_matrix(tempdir, species_id, batch, index, args['max_sites'])
-	# merge temp matrixes
-	merge_matrices(tempdir, species_id, samples, batches, args)
-
-def temp_matrix(tempdir, species_id, samples, index, max_sites):
-	""" Build SNP matrices using a subset of total samples """
-	sample_ids = [s.id for s in samples]
-	matrices = open_matrices(tempdir, sample_ids, index)
-	snpfiles = open_infiles(species_id, samples)
-	nsites = 0
-	while True:
-		records = store_data(snpfiles)
-		if records is None: # eof
-			break
-		elif nsites >= max_sites:
-			break
-		else:
-			nsites += 1
-			site_id = '|'.join([records[0]['ref_id'], records[0]['ref_pos'], records[0]['ref_allele']])
-			for field in ['ref_freq', 'depth', 'alt_allele']:
-				values = [rec[field] for rec in records]
-				matrices[field].write(site_id+'\t'+'\t'.join(values)+'\n')
-
-def merge_matrices(tempdir, species_id, samples, batches, args):
-	""" Merge together temp SNP matrices """
-	if len(batches) == 1: # if only one batch, just rename files
-		for type in ['ref_freq', 'depth', 'alt_allele']:
-			inpath = '%s/snps_%s.0.txt' % (tempdir, type)
-			outpath = '%s/snps_%s.txt' % (tempdir, type)
-			shutil.move(inpath, outpath)
-	else:  # if > one batch, merge temp matrices
-		# open temporary matrixes
-		infiles = {}
-		for type in ['ref_freq', 'depth', 'alt_allele']:
-			files = []
-			for index, batch in enumerate(batches):
-				inpath = '%s/snps_%s.%s.txt' % (tempdir, type, index)
-				files.append(open(inpath))
-			infiles[type] = files
-		# merge temporary matrixes
-		matrices = open_matrices(tempdir, sample_ids=[s.id for s in samples])
-		for type in ['ref_freq', 'depth', 'alt_allele']:
-			files = infiles[type]
-			for file in files: next(file) # skip header
-			while True:
-				values = []
-				try:
-					for index, file in enumerate(files):
-						v = next(file).rstrip().split()
-						if index == 0: values += v
-						else: values += v[1:]
-					matrices[type].write('\t'.join(values)+'\n')
-				except StopIteration:
-					break
-		for file in matrices.values(): file.close()
-		# close temp files
-		for type in ['ref_freq', 'depth', 'alt_allele']:
-			for file in infiles[type]:
-				file.close()
+from midas.merge import merge
 
 def format_dict(d):
 	""" Format dictionary. ex: 'A:SYN|C:NS|T:NS|G:NS' """
 	return '|'.join(['%s:%s' % (x, y) for x, y in d.items()])
 
-def write_site_info(siteinfo, site_depth=None, site=None, header=None):
-	""" Write site info to file """
-	if header:
-		fields = ['site_id', 'mean_freq', 'mean_depth', 'site_prev', 'allele_props', 'site_type', 'gene_id', 'amino_acids', 'snps']
-		siteinfo.write('\t'.join(fields)+'\n')
-	else:
-		rec = []
-		rec.append(site.id)
-		rec.append(site.mean_freq())
-		rec.append(site.mean_depth())
-		rec.append(site.prev(site_depth))
-		rec.append(format_dict(site.allele_props()))
-		rec.append(site.site_type)
-		rec.append(site.gene_id)
-		rec.append(format_dict(site.amino_acids))
-		rec.append(format_dict(site.snp_types))
-		siteinfo.write('\t'.join([str(_) for _ in rec])+'\n')
+def format_list(x, y):
+	""" Format list. ex: 'A:SYN|C:NS|T:NS|G:NS' """
+	return '|'.join(['%s:%s' % (i, j) for i, j in zip(x,y)])
 
-def write_matrices(site, matrices):
-	""" Write site to output matrices """
-	matrices['ref_freq'].write(site.id+'\t'+'\t'.join(site.ref_freq)+'\n')
-	matrices['depth'].write(site.id+'\t'+'\t'.join(site.depth)+'\n')
-	matrices['alt_allele'].write(site.id+'\t'+'\t'.join(site.alt_allele)+'\n')
-
-def filter_snp_matrix(species_id, samples, args):
-	""" Extract subset of site from SNP-matrix """
-	
-	# init variables for site annotation
-	gene_index = [0]
-	contigs = annotate.read_genome(args['db'], species_id)
-	genes = annotate.read_genes(args['db'], species_id, contigs)
-
-	# open site matrixes
-	outdir = os.path.join(args['outdir'], species_id)
-	sample_ids = [s.id for s in samples]
-	matrices = open_matrices(outdir, sample_ids)
-	
-	# open site info file & write header
-	siteinfo = open('%s/snps_info.txt' % outdir, 'w')
-	write_site_info(siteinfo, header=True)
-	
-	# parse genomic sites
-	tempdir = '%s/%s/temp' % (args['outdir'], species_id)
-	for index, site in enumerate(snp_matrix.parse_sites(tempdir)):
-		if args['max_sites'] is not None and index >= args['max_sites']:
-			break
-		elif site.filter(args['site_depth'], args['site_prev'], args['site_maf']):
-			continue
-		else:
-			annotate.annotate_site(site, genes, gene_index, contigs)
-			write_site_info(siteinfo, args['site_depth'], site)
-			write_matrices(site, matrices)
-
-def write_readme(args, sp):
-	outfile = open('%s/%s/readme.txt' % (args['outdir'], sp.id), 'w')
+def write_readme(species, outdir, dbdir):
+	outfile = open('%s/%s/readme.txt' % (outdir, species.id), 'w')
 	outfile.write("""
 Description of output files and file formats from 'merge_midas.py snps'
 
 Output files
 ############
-snps_ref_freq.txt  
-  frequency of reference allele per genomic site and per sample (0.0)
-snps_alt_allele.txt  
-  alternate allele per genomic site and per sample
-snps_depth.txt  
+snps_freq.txt
+  frequency of minor allele per genomic site and per sample
+snps_depth.txt
   number of reads mapped to genomic site per sample
 snps_info.txt  
   metadata for genomic site
@@ -181,7 +38,7 @@ snps_log.txt
 
 Output formats
 ############
-snps_ref_freq.txt, snps_alt_allele.txt, snps_depth.txt,
+snps_freq.txt and snps_depth.txt
   tab-delimited matrix files
   field names are sample ids
   row names are genome site ids
@@ -204,33 +61,381 @@ snps_info.txt
 
 Additional information for species can be found in the reference database:
  %s/rep_genomes/%s
-""" % (args['db'], sp.id) )
+""" % (dbdir, species.id) )
 	outfile.close()
 
+def read_genes(db, species_id, contigs):
+	""" Read in gene coordinates from features file """
+	genes_path = '%s/rep_genomes/%s/genome.features.gz' % (db, species_id)
+	genes = []
+	for gene in utility.parse_file(genes_path):
+		if gene['gene_type'] == 'RNA':
+			continue
+		else:
+			gene['start'] = int(gene['start'])
+			gene['end'] = int(gene['end'])
+			gene['seq'] = get_gene_seq(gene, contigs[gene['scaffold_id']])
+			genes.append(gene)
+	return genes
+
+def read_genome(db, species_id):
+	""" Read in representative genome from reference database """
+	inpath = '%s/rep_genomes/%s/genome.fna.gz' % (db, species_id)
+	infile = utility.iopen(inpath)
+	genome = {}
+	for r in Bio.SeqIO.parse(infile, 'fasta'):
+		genome[r.id] = r.seq.upper()
+	infile.close()
+	return genome
+
+def get_gene_seq(gene, contig):
+	""" Fetch nucleotide sequence of gene from genome """
+	seq = contig[gene['start']-1:gene['end']] # 2x check this works for + and - genes
+	if gene['strand'] == '-':
+		return(rev_comp(seq))
+	else:
+		return(seq)
+
+def complement(base):
+	""" Complement nucleotide """
+	d = {'A':'T', 'T':'A', 'G':'C', 'C':'G'}
+	if base in d: return d[base]
+	else: return base
+
+def rev_comp(seq):
+	""" Reverse complement sequence """
+	return(''.join([complement(base) for base in list(seq[::-1])]))
+
+def translate(codon):
+	""" Translate individual codon """
+	codontable = {
+	'ATA':'I', 'ATC':'I', 'ATT':'I', 'ATG':'M',
+	'ACA':'T', 'ACC':'T', 'ACG':'T', 'ACT':'T',
+	'AAC':'N', 'AAT':'N', 'AAA':'K', 'AAG':'K',
+	'AGC':'S', 'AGT':'S', 'AGA':'R', 'AGG':'R',
+	'CTA':'L', 'CTC':'L', 'CTG':'L', 'CTT':'L',
+	'CCA':'P', 'CCC':'P', 'CCG':'P', 'CCT':'P',
+	'CAC':'H', 'CAT':'H', 'CAA':'Q', 'CAG':'Q',
+	'CGA':'R', 'CGC':'R', 'CGG':'R', 'CGT':'R',
+	'GTA':'V', 'GTC':'V', 'GTG':'V', 'GTT':'V',
+	'GCA':'A', 'GCC':'A', 'GCG':'A', 'GCT':'A',
+	'GAC':'D', 'GAT':'D', 'GAA':'E', 'GAG':'E',
+	'GGA':'G', 'GGC':'G', 'GGG':'G', 'GGT':'G',
+	'TCA':'S', 'TCC':'S', 'TCG':'S', 'TCT':'S',
+	'TTC':'F', 'TTT':'F', 'TTA':'L', 'TTG':'L',
+	'TAC':'Y', 'TAT':'Y', 'TAA':'_', 'TAG':'_',
+	'TGC':'C', 'TGT':'C', 'TGA':'_', 'TGG':'W',
+	}
+	return codontable[str(codon)]
+
+def index_replace(codon, allele, pos, strand):
+	""" Replace character at index i in string x with y"""
+	bases = list(codon)
+	bases[pos] = allele if strand == '+' else complement(allele)
+	return(''.join(bases))
+
+class GenomicSite:
+	def __init__(self, nsamples):
+		self.id = None
+		self.alleles = {'A':0, 'T':1, 'C':2, 'G':3} # <dic>, mapping of allele to list index
+		
+		# site annotations
+		self.ref_id = None
+		self.ref_pos = None
+		self.site_type = None
+		self.gene_id = None
+		self.amino_acids = None
+		self.ref_codon = None
+		self.codon_pos = None
+		
+		# site info
+		self.ref_allele = None
+		self.major_allele = None
+		self.minor_count = None
+		self.minor_freq = None
+		self.prevalence = None
+		
+		# pooled statistics
+		self.pooled_counts = [0,0,0,0] # <list>, count of each allele across all samples
+		self.pooled_depth = None # <int>, count of all alleles from all samples
+		self.pooled_freq = None # <list>, allele frequency from pooled samples
+		
+		# per-sample statistics
+		self.sample_counts = [] # <list>, [A,T,C,G] counts per sample
+		self.sample_freqs = [] # <list>, minor allele frequencies
+		self.sample_depths = [] # <list>, count of major+minor allele frequencies
+				
+	def compute_pooled_counts(self):
+		""" Compute pooled nucleotide statistics (counts, depth, freq) at GenomicSite """
+		for counts in self.sample_counts:
+			for i in range(4):
+				self.pooled_counts[i] += counts[i]
+		self.pooled_depth = sum(self.pooled_counts)
+		if self.pooled_depth > 0:
+			self.pooled_freq = [self.pooled_counts[i]/float(self.pooled_depth) for i in range(4)]
+		else:
+			self.pooled_freq = [0.0]*4
+
+	def call_major_minor_alleles(self):
+		""" Call major and minor alleles at GenomicSite """
+		if self.pooled_depth > 0:
+			allele_counts = [(i,j) for i,j in zip(list('ATCG'), self.pooled_counts)]
+			sorted_counts = sorted(allele_counts, key=itemgetter(1), reverse=True)
+			self.major_allele, self.major_count = sorted_counts[0]
+			self.minor_allele, self.minor_count = sorted_counts[1]
+			self.minor_freq = float(self.minor_count)/(self.minor_count+self.major_count)
+		else:
+			self.major_allele, self.minor_allele = random.sample(list('ATCG'), 2)
+			self.minor_freq = 0.0
+	
+	def compute_multi_freq(self):
+		""" Compute combined frequency of 3rd and 4rd alleles """
+		self.multi_freq = 0
+		for allele in list('ATCG'):
+			if not allele in [self.major_allele, self.minor_allele]:
+				self.multi_freq += self.pooled_freq[self.alleles[allele]]
+
+	def compute_minor_freqs(self):
+		""" Compute per-sample depth (major + minor allele) and minor allele freq at GenomicSite """
+		for counts in self.sample_counts:
+			count_major = counts[self.alleles[self.major_allele]]
+			count_minor = counts[self.alleles[self.minor_allele]]
+			sample_depth = count_major + count_minor
+			sample_freq = float(count_minor)/sample_depth if sample_depth > 0 else 0.0
+			self.sample_freqs.append(sample_freq)
+			self.sample_depths.append(sample_depth)
+
+	def compute_prevalence(self, species, min_depth, max_ratio):
+		""" Compute the fraction of samples where site passes all filters """
+		pass_qc = []
+		for mean_depth, site_depth in zip(species.sample_depth, self.sample_depths):
+			if site_depth < min_depth:
+				pass_qc.append(0)
+			elif site_depth/mean_depth > max_ratio:
+				pass_qc.append(0)
+			else:
+				pass_qc.append(1)
+		self.prevalence = sum(pass_qc)/float(len(pass_qc))
+
+	def filter_site(self, min_maf=0.0, min_prev=0.0, max_multi_freq=1.0):
+		""" Filter genomic site based on MAF and prevalence """
+		if self.minor_freq < min_maf:
+			return True
+		if self.prevalence < min_prev:
+			return True
+		if self.multi_freq > max_multi_freq:
+			return True
+		return False
+
+	def annotate(self, genes, gene_index, contigs):
+		""" Annotate variant and reference site """
+		# genes: list of genes, each gene contains info
+		# contig: contig sequence
+		# gene_index: current position in list of genes; global variable
+		self.amino_acids = {}
+		while True:
+			# 1. fetch next gene
+			#    if there are no more genes, snp must be non-coding so break
+			if gene_index[0] < len(genes):
+				gene = genes[gene_index[0]]
+			else:
+				self.site_type = 'NC'; self.gene_id = ''
+				return
+			# 2. if snp is upstream of next gene, snp must be non-coding so break
+			if (self.ref_id < gene['scaffold_id'] or
+			   (self.ref_id == gene['scaffold_id'] and self.ref_pos < gene['start'])):
+				self.site_type = 'NC'; self.gene_id = ''
+				return
+			# 3. if snp is downstream of next gene, pop gene, check (1) and (2) again
+			if (self.ref_id > gene['scaffold_id'] or
+			   (self.ref_id == gene['scaffold_id'] and self.ref_pos > gene['end'])):
+				gene_index[0] += 1
+				continue
+			# 4. otherwise, snp must be in gene
+			#    annotate site (1D-4D)
+			else:
+				self.gene_id = gene['gene_id']
+				self.ref_codon, self.codon_pos = self.fetch_ref_codon(gene)
+				if not all([_ in ['A','T','C','G'] for _ in self.ref_codon]): # check for invalid bases in codon
+					self.site_type = 'NA'; self.gene_id = ''
+				else:
+					for allele in ['A','T','C','G']: # + strand
+						codon = index_replace(self.ref_codon, allele, self.codon_pos, gene['strand']) # +/- strand
+						self.amino_acids[allele] = translate(codon)
+					unique_aa = set(self.amino_acids.values())
+					degeneracy = 4 - len(unique_aa) + 1
+					self.site_type = '%sD' % degeneracy
+					# AA's identical: degeneracy = 4 - 1 + 1 = 4
+					# AA's all different, degeneracy = 4 - 4 + 1 = 1
+				return
+
+	def fetch_ref_codon(self, gene):
+		""" Fetch codon within gene for given site """
+		# position of site in gene
+		gene_pos = self.ref_pos-gene['start'] if gene['strand']=='+' else gene['end']-self.ref_pos
+		# position of site in codon
+		codon_pos = gene_pos % 3
+		# gene sequence (oriented start to stop)
+		ref_codon = gene['seq'][gene_pos-codon_pos:gene_pos-codon_pos+3]
+		return ref_codon, codon_pos
+
+def init_sample_offsets(species):
+	""" Store sample.path, sample.offset, and sample.header
+		species is list of Species objects
+	    Species.samples is a list of Sample objects """
+	for sample in species.samples:
+		sample.path = '%s/snps/output/%s.snps.gz' % (sample.dir, species.id)
+		file = gzip.open(sample.path)
+		line = next(file)
+		sample.offset = len(line)
+		sample.header = line.rstrip('\n').split('\n')
+		file.close()
+
+def store_sample_counts(samples, sites):
+	""" Store allele counts at block of sites for species.samples """
+		
+	for sample_index, sample in enumerate(samples):
+		file = gzip.open(sample.path)
+		file.seek(sample.offset)
+		for site in sites:
+			line = next(file)
+			sample.offset += len(line)
+			values = line.rstrip('\n').split('\t')
+			site.sample_counts.append(values[-1])
+			if sample_index==0:
+				site.ref_id = values[0]
+				site.ref_pos = int(values[1])
+				site.ref_allele = values[2]
+				site.id = values[0]+'|'+values[1]
+		file.close()
+	for site in sites: # format counts
+		site.sample_counts = [[int(j) for j in i.split(',')] for i in site.sample_counts]
+
+def open_outfiles(species, outdir):
+	""" Open output files for species """
+	species.outdir = os.path.join(outdir, species.id)
+	species.files = {}
+	for type in ['info', 'freq', 'depth']:
+		species.files[type] = open('%s/snps_%s.txt' % (species.outdir, type), 'w')
+	for type in ['freq', 'depth']:
+		species.files[type].write('\t'.join(['site_id']+[s.id for s in species.samples])+'\n')
+	info_fields = ['site_id', 'site_prev', 'ref_allele', 'major_allele', 'minor_allele', 'minor_freq', 'atcg_counts', 'site_type', 'atcg_aas', 'gene_id']
+	species.files['info'].write('\t'.join(info_fields)+'\n')
+
+def store_site(species, site):
+	""" Store data for GenomicSite in Species"""
+	# snps_info
+	atcg_counts = ','.join([str(_) for _ in site.pooled_counts])
+	atcg_aas = ','.join([site.amino_acids[_] for _ in list('ATCG')]) if site.amino_acids != {} else ''
+	info = '\t'.join([site.id, str(site.prevalence), site.ref_allele,
+				site.major_allele, site.minor_allele, str(site.minor_freq),
+				atcg_counts, site.site_type, atcg_aas, site.gene_id])+'\n'
+	species.files['info'].write(info)
+	# snps_freq
+	freq = site.id + '\t' + '\t'.join([str(freq) for freq in site.sample_freqs])+'\n'
+	species.files['freq'].write(freq)
+	# snps_depth
+	depth = site.id + '\t' + '\t'.join([str(depth) for depth in site.sample_depths])+'\n'
+	species.files['depth'].write(depth)
+
+def fetch_genome_length(species):
+	""" Fetch length of representative genome """
+	file = open('%s/snps/summary.txt' % species.samples[0].dir)
+	reader = csv.DictReader(file, delimiter='\t')
+	for r in reader:
+		species.genome_length = int(r['genome_length'])
+		break
+	file.close()
+
+def split_sites(genome_length, max_sites, sites_per_iter=10000):
+	""" Create list of integers indicating the number of genomic sites to process at one time """
+	max_sites = min(genome_length, max_sites)
+	total_sites = 0
+	site_batches = []
+	while True:
+		site_batches.append(sites_per_iter)
+		total_sites += sites_per_iter
+		if total_sites >= max_sites:
+			site_batches[-1] -= (total_sites - max_sites)
+			break
+	return site_batches
+
 def merge_snps(args, species):
-	log = open('%s/%s/snps_log.txt' % (args['outdir'], species.id), 'w')
-	log.write("Merging: %s for %s samples\n" % (species.id, len(species.samples)))
-	log.write("  merging per-sample statistics\n")
-	merge.write_summary_stats(species.id, species.samples, args, 'snps')
-	log.write("  merging per-site statistics\n")
-	build_snp_matrix(species.id, species.samples, args)
-	log.write("  extracting and annotating specified sites\n")
-	filter_snp_matrix(species.id, species.samples, args)
-	log.write("  removing temporary files\n")
-	shutil.rmtree('%s/%s/temp' % (args['outdir'], species.id))
-	log.close()
-	write_readme(args, species)
+	"""
+	Merge nucleotide variants for specified species
+
+	args = dictionary of command-line arguments:
+	  'outdir' = path to output directory
+	  'db' = path to midas database
+	  'max_sites' = maximum number of sites to process
+	  'site_depth' = minimum depth for calling a site present in a sample
+	  'site_ratio' = minimum ratio of site_depth:sample depth
+	  'site_maf' = minimum pooled minor allele frequency for site
+	  'site_prev' = minimum fraction of samples where site passes filters
+	  'sites_per_iter' = number of sites to store in memory at one time
+	species = Species object:
+	  species.id = species identifier
+	  species.samples = list of Sample objects:
+	    sample.dir = path to sample directory
+		sample.id = sample identifier
+		sample.info = dictionary of summary stats
+	  sample.sample_depth = list of average read-depths of samples for species
+	"""
+	write_readme(species, args['outdir'], args['db'])
+
+	species.write_sample_info(type='snps', outdir=args['outdir'])
+
+	open_outfiles(species, args['outdir'])
+
+	init_sample_offsets(species)
+
+	fetch_genome_length(species)
+
+	contigs = read_genome(args['db'], species.id)
+
+	genes, gene_index = read_genes(args['db'], species.id, contigs), [0]
+
+	for nsites in split_sites(
+			genome_length=species.genome_length,
+			max_sites=args['max_sites'],
+			sites_per_iter=args['sites_per_iter']):
+			
+		nsamples = len(species.samples)
+		sites = [GenomicSite(nsamples) for i in range(nsites)]
+		store_sample_counts(species.samples, sites)
+		for site in sites:
+			site.compute_pooled_counts()
+			site.call_major_minor_alleles()
+			site.compute_multi_freq()
+			site.compute_minor_freqs()
+			site.compute_prevalence(species,
+			                        min_depth=args['site_depth'],
+			                        max_ratio=args['site_ratio'])
+			filter = site.filter_site(min_maf=args['site_maf'],
+			                          min_prev=args['site_prev'],
+									  max_multi_freq=args['site_multi_freq'])
+			print site.multi_freq
+			if not filter:
+				site.annotate(genes, gene_index, contigs)
+				store_site(species, site)
+
 
 def run_pipeline(args):
 
+	start = time()
+
 	print("Identifying species")
 	species = merge.select_species(args, type='snps')
-	
+	for sp in species:
+		print sp.id, len(sp.samples)
+		
 	print("Merging snps")
-	batches =[]
-	for species in species:
-		batches.append({'args':args, 'species':species})
-	utility.parallel(merge_snps, batches, args['threads'])
+	merge_snps(args, species[0])
+
+	print("time, s: %s" % str(time() - start))
+	print("mem, gb: %s" % str(utility.max_mem_usage()))
+
+
 
 
 
