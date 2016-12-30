@@ -123,7 +123,7 @@ def select_species(args, type='genes'):
 	samples = init_samples(args['indirs'], type)
 	species = init_species(samples, args)
 	species = filter_species(species, args)
-	print("  found %s species with sufficient high-coverage samples\n" % len(species))
+	#print("  found %s species with sufficient high-coverage samples\n" % len(species))
 	return species
 
 

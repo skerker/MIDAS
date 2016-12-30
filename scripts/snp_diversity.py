@@ -4,7 +4,7 @@
 # Copyright (C) 2015 Stephen Nayfach
 # Freely distributed under the GNU General Public License (GPLv3)
 
-import argparse, sys, os, numpy as np, random
+import argparse, sys, os, numpy as np, random, csv
 from midas.utility import print_copyright
 from midas import parse
 
@@ -182,7 +182,7 @@ def list_genes(args):
 	""" List the set of genes from snps_info.txt """
 	genes = set([])
 	path = '%s/snps_info.txt' % args['indir']
-	for r in csv.DictReader(open(path)):
+	for r in csv.DictReader(open(path), delimiter='\t'):
 		if r['gene_id'] != '': genes.add(r['gene_id'])
 	return genes
 
@@ -242,10 +242,9 @@ def compute_snp_diversity(args, species, samples):
 		site.summary_stats()
 		
 		#  filter genomic site
-		if site.filter(args['site_prev'], args['site_maf'], args['site_type']):
-			continue
-		else:
-			index += 1
+		site.filter(args['site_prev'], args['site_maf'], args['site_type'])
+		if not site.keep: continue
+		else: index += 1
 
 		# downsample reads & recompute pooled frequency
 		if args['rand_reads'] and site.pooled_maf > 0.0:
@@ -259,6 +258,7 @@ def compute_snp_diversity(args, species, samples):
 				pi.snps += 1 if is_snp(site.pooled_maf, args['snp_maf']) else 0
 				pi.sites += 1
 			else:
+				print [site.gene_id, site.site_type]
 				pi[site.gene_id].pi += compute_pi(site.pooled_maf)
 				pi[site.gene_id].snps += 1 if is_snp(site.pooled_maf, args['snp_maf']) else 0
 				pi[site.gene_id].sites += 1
@@ -318,6 +318,7 @@ if __name__ == '__main__':
 	species = parse.Species(args['indir'])
 	samples = parse.fetch_samples(species, args['sample_depth'], args['fract_cov'], args['max_samples'],
 								  args['keep_samples'], args['exclude_samples'], args['rand_samples'])
+	print(" %s samples selected" % len(samples))
 
 	print("Estimating diversity metrics...")
 	pi = compute_snp_diversity(args, species, samples)

@@ -6,6 +6,7 @@
 
 import os, sys, platform, argparse, numpy as np
 from midas import utility
+from time import time
 
 def get_program():
 	""" Get program specified by user (species, genes, or snps) """
@@ -180,6 +181,8 @@ merge_midas.py snps /path/to/outdir -i /path/to/samples -t dir --max_species 1 -
 		help="Number of CPUs to use for merging files (1)\nIncreases speed when merging many species")
 	parser.add_argument('--sites_per_iter', type=int, default=20000, metavar='INT',
 		help=argparse.SUPPRESS)
+	parser.add_argument('--max_gb', type=float, metavar='FLOAT',
+		help="Maximum memory for program to use per species")
 	io = parser.add_argument_group('Input/Output')
 	io.add_argument('-i', type=str, dest='input', required=True,
 		help="""Input to sample directories output by run_midas.py
@@ -202,6 +205,7 @@ By default, the MIDAS_DB environmental variable is used""")
 		help="""Comma-separated list of species ids""")
 	species.add_argument('--max_species', type=int, metavar='INT',
 		help="""Maximum number of species to merge (use all)""")
+	
 	sample = parser.add_argument_group("Sample filters (select subset of samples from INPUT)")
 	sample.add_argument('--sample_depth', dest='sample_depth', type=float, default=5.0, metavar='FLOAT',
 		help="""Minimum average read depth per sample (5.0)""")
@@ -209,6 +213,8 @@ By default, the MIDAS_DB environmental variable is used""")
 		help="""Fraction of reference sites covered by at least 1 read (0.4)""")
 	sample.add_argument('--max_samples', type=int, metavar='INT',
 		help="""Maximum number of samples to process. useful for quick tests (use all)""")
+	sample.add_argument('--all_samples', default=False, action='store_true',
+		help="""Include all samples in output""")
 	snps = parser.add_argument_group("Site filters (select subset of genomic sites from INPUT)")
 	snps.add_argument('--site_depth', type=int, default=3, metavar='INT',
 		help="""Minimum number of mapped reads per site (3)
@@ -232,7 +238,23 @@ This filter helps to eliminate sites with more than 2 common variants""")
 	snps.add_argument('--max_sites', type=int, default=float('Inf'), metavar='INT',
 		help="""Maximum number of sites to include in output (use all)
 Useful for quick tests """)
+	snps.add_argument('--all_sites', default=False, action='store_true',
+		help="""Include all genomic sites in output""")
 	args = vars(parser.parse_args())
+	args = add_snp_presets(args)
+	return args
+
+def add_snp_presets(args):
+	""" Set argument values based on selected presets """
+	if args['all_samples']:
+		args['sample_depth'] = 0.0
+		args['fract_cov'] = 0.0
+	if args['all_sites']:
+		args['site_depth'] = 0
+		args['site_ratio'] = float('Inf')
+		args['site_prev'] = 0.0
+		args['site_maf'] = 0.0
+		args['site_multi_freq'] = 1.0
 	return args
 
 def check_arguments(program, args):
@@ -352,12 +374,15 @@ def run_program(program, args):
 		sys.exit("\nError: Unrecognized program: '%s'\n" % program)
 
 if __name__ == '__main__':
+	start = time()
 	program = get_program()
 	args = get_arguments(program)
 	check_arguments(program, args)
 	utility.print_copyright()
 	print_arguments(program, args)
 	run_program(program, args)
+	print("  %s minutes" % round((time() - start)/60, 2) )
+	print("  %s Gb maximum memory" % utility.max_mem_usage())
 
 
 

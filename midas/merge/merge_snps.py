@@ -217,15 +217,20 @@ class GenomicSite:
 				pass_qc.append(1)
 		self.prevalence = sum(pass_qc)/float(len(pass_qc))
 
-	def filter_site(self, min_maf=0.0, min_prev=0.0, max_multi_freq=1.0):
+	def filter(self, min_maf=0.0, min_prev=0.0, max_multi_freq=1.0):
 		""" Filter genomic site based on MAF and prevalence """
 		if self.minor_freq < min_maf:
-			return True
-		if self.prevalence < min_prev:
-			return True
-		if self.multi_freq > max_multi_freq:
-			return True
-		return False
+			self.remove = True
+			self.flag = 'min_maf'
+		elif self.prevalence < min_prev:
+			self.remove = True
+			self.flag = 'min_prev'
+		elif self.multi_freq > max_multi_freq:
+			self.remove = True
+			self.flag = 'max_multi_freq'
+		else:
+			self.remove = False
+			self.flag = None
 
 	def annotate(self, genes, gene_index, contigs):
 		""" Annotate variant and reference site """
@@ -278,6 +283,22 @@ class GenomicSite:
 		# gene sequence (oriented start to stop)
 		ref_codon = gene['seq'][gene_pos-codon_pos:gene_pos-codon_pos+3]
 		return ref_codon, codon_pos
+						
+	def store(self, species):
+		""" Store data for GenomicSite in Species"""
+		# snps_info
+		atcg_counts = ','.join([str(_) for _ in self.pooled_counts])
+		atcg_aas = ','.join([self.amino_acids[_] for _ in list('ATCG')]) if self.amino_acids != {} else ''
+		info = '\t'.join([self.id, str(self.prevalence), self.ref_allele,
+					self.major_allele, self.minor_allele, str(self.minor_freq),
+					atcg_counts, self.site_type, atcg_aas, self.gene_id])+'\n'
+		species.files['info'].write(info)
+		# snps_freq
+		freq = self.id + '\t' + '\t'.join([str(freq) for freq in self.sample_freqs])+'\n'
+		species.files['freq'].write(freq)
+		# snps_depth
+		depth = self.id + '\t' + '\t'.join([str(depth) for depth in self.sample_depths])+'\n'
+		species.files['depth'].write(depth)
 
 def init_sample_offsets(species):
 	""" Store sample.path, sample.offset, and sample.header
@@ -291,25 +312,37 @@ def init_sample_offsets(species):
 		sample.header = line.rstrip('\n').split('\n')
 		file.close()
 
-def store_sample_counts(samples, sites):
-	""" Store allele counts at block of sites for species.samples """
-		
-	for sample_index, sample in enumerate(samples):
-		file = gzip.open(sample.path)
-		file.seek(sample.offset)
-		for site in sites:
-			line = next(file)
-			sample.offset += len(line)
-			values = line.rstrip('\n').split('\t')
-			site.sample_counts.append(values[-1])
-			if sample_index==0:
-				site.ref_id = values[0]
-				site.ref_pos = int(values[1])
-				site.ref_allele = values[2]
-				site.id = values[0]+'|'+values[1]
-		file.close()
-	for site in sites: # format counts
-		site.sample_counts = [[int(j) for j in i.split(',')] for i in site.sample_counts]
+def read_sample_data(sample, nsites):
+	""" Fetch block of nsites from sample """
+	file = gzip.open(sample.path)
+	file.seek(sample.offset)
+	data = [next(file) for i in range(nsites)]
+	sample.offset += len(''.join(data))
+	file.close()
+	return data
+
+def load_sample_data(species, sites, output):
+	""" Loop over data from multiple samples and load into GenomicSite objects """
+	# fetch site info from 1st sample
+	for site, line in zip(sites, output[0]):
+		values = line.split('\t')
+		site.ref_id = values[0]
+		site.ref_pos = int(values[1])
+		site.ref_allele = values[2]
+		site.id = values[0]+'|'+values[1]
+	# fetch site counts from all sample
+	for i in range(len(sites)):
+		sites[i].sample_counts = [ [int(_) for _ in o[i].split('\t')[-1].split(',')] for o in output ]
+
+def init_sites(species, nsites, threads):
+	""" Initialize <nsites> for <species> using <threads> """
+	sites = [GenomicSite(nsamples=len(species.samples)) for i in range(nsites)]
+	output = []
+	for sample in species.samples:
+		sample_data = read_sample_data(sample, nsites=len(sites))
+		output.append(sample_data)
+	load_sample_data(species, sites, output)
+	return sites
 
 def open_outfiles(species, outdir):
 	""" Open output files for species """
@@ -322,22 +355,6 @@ def open_outfiles(species, outdir):
 	info_fields = ['site_id', 'site_prev', 'ref_allele', 'major_allele', 'minor_allele', 'minor_freq', 'atcg_counts', 'site_type', 'atcg_aas', 'gene_id']
 	species.files['info'].write('\t'.join(info_fields)+'\n')
 
-def store_site(species, site):
-	""" Store data for GenomicSite in Species"""
-	# snps_info
-	atcg_counts = ','.join([str(_) for _ in site.pooled_counts])
-	atcg_aas = ','.join([site.amino_acids[_] for _ in list('ATCG')]) if site.amino_acids != {} else ''
-	info = '\t'.join([site.id, str(site.prevalence), site.ref_allele,
-				site.major_allele, site.minor_allele, str(site.minor_freq),
-				atcg_counts, site.site_type, atcg_aas, site.gene_id])+'\n'
-	species.files['info'].write(info)
-	# snps_freq
-	freq = site.id + '\t' + '\t'.join([str(freq) for freq in site.sample_freqs])+'\n'
-	species.files['freq'].write(freq)
-	# snps_depth
-	depth = site.id + '\t' + '\t'.join([str(depth) for depth in site.sample_depths])+'\n'
-	species.files['depth'].write(depth)
-
 def fetch_genome_length(species):
 	""" Fetch length of representative genome """
 	file = open('%s/snps/summary.txt' % species.samples[0].dir)
@@ -347,7 +364,7 @@ def fetch_genome_length(species):
 		break
 	file.close()
 
-def split_sites(genome_length, max_sites, sites_per_iter=10000):
+def split_sites(genome_length, sites_per_iter, max_sites):
 	""" Create list of integers indicating the number of genomic sites to process at one time """
 	max_sites = min(genome_length, max_sites)
 	total_sites = 0
@@ -381,59 +398,58 @@ def merge_snps(args, species):
 		sample.info = dictionary of summary stats
 	  sample.sample_depth = list of average read-depths of samples for species
 	"""
+	
 	write_readme(species, args['outdir'], args['db'])
-
 	species.write_sample_info(type='snps', outdir=args['outdir'])
-
 	open_outfiles(species, args['outdir'])
-
 	init_sample_offsets(species)
-
 	fetch_genome_length(species)
-
 	contigs = read_genome(args['db'], species.id)
-
 	genes, gene_index = read_genes(args['db'], species.id, contigs), [0]
 
-	for nsites in split_sites(
-			genome_length=species.genome_length,
-			max_sites=args['max_sites'],
-			sites_per_iter=args['sites_per_iter']):
-			
-		nsamples = len(species.samples)
-		sites = [GenomicSite(nsamples) for i in range(nsites)]
-		store_sample_counts(species.samples, sites)
+	site_blocks = split_sites(species.genome_length, species.sites_per_iter, args['max_sites'])
+	
+	for nsites in site_blocks:
+		
+		sites = init_sites(species, nsites, args['threads'])		
 		for site in sites:
 			site.compute_pooled_counts()
 			site.call_major_minor_alleles()
 			site.compute_multi_freq()
 			site.compute_minor_freqs()
-			site.compute_prevalence(species,
-			                        min_depth=args['site_depth'],
-			                        max_ratio=args['site_ratio'])
-			filter = site.filter_site(min_maf=args['site_maf'],
-			                          min_prev=args['site_prev'],
-									  max_multi_freq=args['site_multi_freq'])
-			print site.multi_freq
-			if not filter:
+			site.compute_prevalence(species, args['site_depth'], args['site_ratio'])
+			site.filter(args['site_maf'], args['site_prev'], args['site_multi_freq'])
+			if not site.remove:
 				site.annotate(genes, gene_index, contigs)
-				store_site(species, site)
+				site.store(species)
+
+def id_sites_per_iter(num_samples, max_gb, max_sites_per_iter):
+	""" Set the variable 'sites_per_iter' to keep memory below 'max_gb' 
+		num_samples: number of samples in species
+		max_gb: do not exceed this much ram
+		max_sites_per_iter: maximum value for sites_per_iter 
+	"""
+	if not max_gb:
+		return max_sites_per_iter
+	else:
+		overhead = 2e8
+		max_bytes = max_gb * 1e9 - overhead  # max mem in bytes
+		bytes_per_sample_per_site = 450  # num of bytes per sample per site
+		bytes_per_site = bytes_per_sample_per_site * num_samples # num of bytes per site
+		sites_per_iter = int(max_bytes/bytes_per_site)
+		return min(max_sites_per_iter, sites_per_iter)
 
 
 def run_pipeline(args):
 
-	start = time()
-
-	print("Identifying species")
+	#print("Identifying species")
 	species = merge.select_species(args, type='snps')
 	for sp in species:
-		print sp.id, len(sp.samples)
+		num_samples=len(sp.samples)
+		sp.sites_per_iter = id_sites_per_iter(num_samples, args['max_gb'], args['sites_per_iter'])
 		
-	print("Merging snps")
+	#print("Merging snps")
 	merge_snps(args, species[0])
-
-	print("time, s: %s" % str(time() - start))
-	print("mem, gb: %s" % str(utility.max_mem_usage()))
 
 
 
