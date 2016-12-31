@@ -9,6 +9,7 @@ from time import time
 from operator import itemgetter
 from midas import utility
 from midas.merge import merge
+import multiprocessing as mp
 
 def format_dict(d):
 	""" Format dictionary. ex: 'A:SYN|C:NS|T:NS|G:NS' """
@@ -312,16 +313,16 @@ def init_sample_offsets(species):
 		sample.header = line.rstrip('\n').split('\n')
 		file.close()
 
-def read_sample_data(sample, nsites):
+def read_data(sample, nsites):
 	""" Fetch block of nsites from sample """
 	file = gzip.open(sample.path)
 	file.seek(sample.offset)
 	data = [next(file) for i in range(nsites)]
-	sample.offset += len(''.join(data))
+	offset = sample.offset + len(''.join(data))
 	file.close()
-	return data
+	return offset, data
 
-def load_sample_data(species, sites, output):
+def load_data(species, sites, output):
 	""" Loop over data from multiple samples and load into GenomicSite objects """
 	# fetch site info from 1st sample
 	for site, line in zip(sites, output[0]):
@@ -334,15 +335,33 @@ def load_sample_data(species, sites, output):
 	for i in range(len(sites)):
 		sites[i].sample_counts = [ [int(_) for _ in o[i].split('\t')[-1].split(',')] for o in output ]
 
-def init_sites(species, nsites, threads):
-	""" Initialize <nsites> for <species> using <threads> """
-	sites = [GenomicSite(nsamples=len(species.samples)) for i in range(nsites)]
-	output = []
-	for sample in species.samples:
-		sample_data = read_sample_data(sample, nsites=len(sites))
-		output.append(sample_data)
-	load_sample_data(species, sites, output)
-	return sites
+
+#def load_data(species, sites, output):
+#	""" Loop over data from multiple samples and load into GenomicSite objects 
+#	
+#		output: list of lists, each element
+#	"""
+#	# fetch site info from 1st sample
+#	for site, line in zip(sites, output[0]):
+#		values = line.split('\t')
+#		site.ref_id = values[0]
+#		site.ref_pos = int(values[1])
+#		site.ref_allele = values[2]
+#		site.id = values[0]+'|'+values[1]
+#	# fetch site counts from all sample
+#	for i in range(len(sites)):
+#		sites[i].sample_counts = [ [int(_) for _ in o[i].split('\t')[-1].split(',')] for o in output ]
+
+
+def parallel_read_data(species, nsites, threads):
+	""" """
+	pool = mp.Pool(processes=threads)
+	results = [pool.apply_async(read_data, args=(s, nsites)) for s in species.samples]
+	offsets = [result.get()[0] for result in results]
+	data = [result.get()[1] for result in results]
+	for offset, sample in zip(offsets, species.samples):
+		sample.offset = offset
+	return data
 
 def open_outfiles(species, outdir):
 	""" Open output files for species """
@@ -355,16 +374,7 @@ def open_outfiles(species, outdir):
 	info_fields = ['site_id', 'site_prev', 'ref_allele', 'major_allele', 'minor_allele', 'minor_freq', 'atcg_counts', 'site_type', 'atcg_aas', 'gene_id']
 	species.files['info'].write('\t'.join(info_fields)+'\n')
 
-def fetch_genome_length(species):
-	""" Fetch length of representative genome """
-	file = open('%s/snps/summary.txt' % species.samples[0].dir)
-	reader = csv.DictReader(file, delimiter='\t')
-	for r in reader:
-		species.genome_length = int(r['genome_length'])
-		break
-	file.close()
-
-def split_sites(genome_length, sites_per_iter, max_sites):
+def split_sites(genome_length, sites_per_iter, max_sites=float('Inf')):
 	""" Create list of integers indicating the number of genomic sites to process at one time """
 	max_sites = min(genome_length, max_sites)
 	total_sites = 0
@@ -398,21 +408,54 @@ def merge_snps(args, species):
 		sample.info = dictionary of summary stats
 	  sample.sample_depth = list of average read-depths of samples for species
 	"""
-	
+		
 	write_readme(species, args['outdir'], args['db'])
 	species.write_sample_info(type='snps', outdir=args['outdir'])
 	open_outfiles(species, args['outdir'])
 	init_sample_offsets(species)
-	fetch_genome_length(species)
+	
 	contigs = read_genome(args['db'], species.id)
 	genes, gene_index = read_genes(args['db'], species.id, contigs), [0]
 
+	# sites are split into blocks to limit memory usage
 	site_blocks = split_sites(species.genome_length, species.sites_per_iter, args['max_sites'])
-	
 	for nsites in site_blocks:
+
+		# 1. read raw data from files in parallel (1 file per thread)
+		# data = [ [l1_s1, l2_s1, ...], [l1_s2, l2_s2, ...] ]
+		data = parallel_read_data(species, nsites, args['threads'])
+
+		# 2. parse raw data in parallel (1 block of sites per thread)
+		# each site block split up a 2 time
+		# this is done to increase throughput
 		
-		sites = init_sites(species, nsites, args['threads'])		
-		for site in sites:
+		
+		### pick up here
+		
+		start_stop = []
+		for msites in split_sites(nsites, nsites/args['threads']):
+			if len(start_stop) == 0:
+				start_stop.append([0,msites])
+			else:
+				start_stop.append([start_stop[-1][0]+msites, start_stop[-1][1]+msites])
+
+		nsamples = len(species.samples)
+
+		start, stop = start_stop[0]
+
+		data_block = [_[start:stop] for _ in data]
+
+		sites = [GenomicSite(nsamples) for i in range(stop-start)]
+
+		for site, line in zip(sites, data_block[0]):
+			values = line.split('\t')
+			site.ref_id = values[0]
+			site.ref_pos = int(values[1])
+			site.ref_allele = values[2]
+			site.id = values[0]+'|'+values[1]
+
+		for m, site in enumerate(sites):
+			site.sample_counts = [ [int(_) for _ in o[m].split('\t')[-1].split(',')] for o in data_block ]
 			site.compute_pooled_counts()
 			site.call_major_minor_alleles()
 			site.compute_multi_freq()
@@ -421,7 +464,8 @@ def merge_snps(args, species):
 			site.filter(args['site_maf'], args['site_prev'], args['site_multi_freq'])
 			if not site.remove:
 				site.annotate(genes, gene_index, contigs)
-				site.store(species)
+
+		quit()
 
 def id_sites_per_iter(num_samples, max_gb, max_sites_per_iter):
 	""" Set the variable 'sites_per_iter' to keep memory below 'max_gb' 
@@ -432,7 +476,7 @@ def id_sites_per_iter(num_samples, max_gb, max_sites_per_iter):
 	if not max_gb:
 		return max_sites_per_iter
 	else:
-		overhead = 2e8
+		overhead = 2e8 # 200 Mb
 		max_bytes = max_gb * 1e9 - overhead  # max mem in bytes
 		bytes_per_sample_per_site = 450  # num of bytes per sample per site
 		bytes_per_site = bytes_per_sample_per_site * num_samples # num of bytes per site
@@ -442,13 +486,13 @@ def id_sites_per_iter(num_samples, max_gb, max_sites_per_iter):
 
 def run_pipeline(args):
 
-	#print("Identifying species")
-	species = merge.select_species(args, type='snps')
+	print("Identifying species")
+	species = merge.select_species(args, data_type='snps')
 	for sp in species:
 		num_samples=len(sp.samples)
 		sp.sites_per_iter = id_sites_per_iter(num_samples, args['max_gb'], args['sites_per_iter'])
-		
-	#print("Merging snps")
+
+	print("Merging snps")
 	merge_snps(args, species[0])
 
 
