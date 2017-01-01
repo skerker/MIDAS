@@ -104,7 +104,7 @@ def sort_species(species):
 	return [_[0] for _ in x]
 
 def init_species(samples, args):
-	""" store high quality sample-species pairs """
+	""" Store high quality sample-species pairs """
 	species = {}
 	species_info = read_species_info(args['db'])
 	genome_info = read_genome_info(args['db'])
@@ -122,7 +122,8 @@ def filter_species(species, args):
 	""" Pick subset of species to analyze """
 	keep = []
 	for sp in sort_species(species):
-		if len(sp.samples) < int(args['min_samples']):
+		sp.nsamples = len(sp.samples)
+		if sp.nsamples < int(args['min_samples']):
 			continue
 		elif args['max_species'] and len(keep) >= args['max_species']:
 			continue

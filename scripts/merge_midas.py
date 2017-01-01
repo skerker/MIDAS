@@ -179,10 +179,10 @@ merge_midas.py snps /path/to/outdir -i /path/to/samples -t dir --max_species 1 -
 		help="Directory for output files. a subdirectory will be created for each species_id")
 	parser.add_argument('--threads', type=int, default=1, metavar='INT',
 		help="Number of CPUs to use for merging files (1)\nIncreases speed when merging many species")
-	parser.add_argument('--sites_per_iter', type=int, default=20000, metavar='INT',
+	parser.add_argument('--sites_per_iter', type=int, default=1000, metavar='INT',
 		help=argparse.SUPPRESS)
 	parser.add_argument('--max_gb', type=float, metavar='FLOAT',
-		help="Maximum memory for program to use per species")
+		help=argparse.SUPPRESS)
 	io = parser.add_argument_group('Input/Output')
 	io.add_argument('-i', type=str, dest='input', required=True,
 		help="""Input to sample directories output by run_midas.py
@@ -374,15 +374,15 @@ def run_program(program, args):
 		sys.exit("\nError: Unrecognized program: '%s'\n" % program)
 
 if __name__ == '__main__':
-	start = time()
+	#start = time()
 	program = get_program()
 	args = get_arguments(program)
 	check_arguments(program, args)
 	utility.print_copyright()
 	print_arguments(program, args)
 	run_program(program, args)
-	print("  %s minutes" % round((time() - start)/60, 2) )
-	print("  %s Gb maximum memory" % utility.max_mem_usage())
+	#print("  %s minutes" % round((time() - start)/60, 2) )
+	#print("  %s Gb maximum memory" % utility.max_mem_usage())
 
 
 
